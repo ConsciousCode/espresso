@@ -22,10 +22,13 @@ def color(x, c):
 		return f"\x1b[{';'.join(str(COLORS[x]) for x in c)}m"
 	
 	if c is None: return x
-	return f"{ansi(c)}{x}{ansi('reset')}"
+	return f"{ansi(c.split(' '))}{x}{ansi('reset')}"
+
+def join(x, sep):
+	return sep.join(str(e) for e in x)
 
 UNDEFINED = object()
-class Sexp:
+class S:
 	def __init__(self, op, *elems, nl=None, color=None, outer=UNDEFINED):
 		self.op = op
 		self.elems = elems
@@ -34,14 +37,11 @@ class Sexp:
 		
 		OPEN = ("", "")
 		if outer is UNDEFINED:
-			self.outer = OPEN if op is None else "()"
+			self.outer = op and OPEN or "()"
 		else:
 			self.outer = outer or OPEN
 	
 	def __str__(self):
-		def join(x, sep):
-			return sep.join(str(e) for e in x)
-		
 		op = self.op and color(self.op, ["bold", "blue"]) + " " or ""
 		
 		elems = self.elems
@@ -56,37 +56,51 @@ class Sexp:
 		
 		return f"{self.outer[0]}{op}{elems}{self.outer[1]}"
 
-def format_sexp(ast):
-	match ast:
-		case ['line', _, value]: return format_sexp(value)
-		case ['const', int(value)]: return Sexp(None, value, color="yellow")
-		case ['const', str(value)]: return Sexp(None, value, color="underline")
-		case ['id', name]: return Sexp(None, name, color="purple")
-		case ['list', *rest]: return Sexp(None, *map(format_sexp, elems), nl=1, outer="[]")
-		case ['progn'|'block', *elems]: return Sexp(None, *map(format_sexp, elems), nl=1, outer="{}")
-		
-		case ['if', *rest]: return Sexp("if", *map(format_sexp, rest), nl=2)
-		case ["loop", *rest]: return Sexp("loop", *map(format_sexp, rest), nl=all)
-		case ['for', *rest]: return Sexp("for", *map(format_sexp, rest), nl=3)
-		
-		case ["object", *entries]:
-			return Sexp('object', *(Sexp(None, *map(format_sexp, pair), outer="()") for pair in entries))
-		
-		case [str(op), *rest]: return Sexp(op, *rest)
-		case _: return Sexp(repr(ast), outer=None)
+def S(op, *elems, nl=None, color=None, outer=UNDEFINED):
+	OPEN = ("", "")
+	if outer is UNDEFINED:
+		outer = op and OPEN or "()"
+	else:
+		outer = outer or OPEN
+	
+	op = op and color(op, ["bold", "blue"]) + " " or ""
+	
+	if nl is all:
+		elems = join(elems, '\n')
+	elif nl is None:
+		elems = join(elems, ' ')
+	else:
+		elems = join((join(elems[:nl - 1], ' '),) + elems[nl - 1:], '\n  ')
+	
+	return f"{outer[0]}{op}{elems}{outer[1]}"
+	
 
 def sexp(ast):
-	'''Convert sexp ast to an actually readable string'''
-	if ast is None:
-		return "@"
-	
-	return str(format_sexp(ast))
+	NL = '\n'
+	match ast:
+		case None: return "@"
+		case str(value): return color(value, "bold blue")
+		case ['line', _, value]: return sexp(value)
+		case ['const', int(value)]: return color(value, "yellow")
+		case ['const', str(value)]: return color(repr(value), "underline")
+		case ['id', name]: return color(name, "purple")
+		case ['progn'|'block', *elems]:
+			if len(elems) == 0:
+				return "{}"
+			elif len(elems) == 1:
+				return f"{{ {sexp(elems[0])} }}"
+			else:
+				return f"{{\n{indent(NL.join(map(sexp, elems)))}\n}}"
+		
+		case [*rest]:
+			return f"({' '.join(map(sexp, rest))})"
+		case _: return repr(ast)
 
 def summary(ast):
 	s = sexp(ast)
 	if len(s) < 100:
 		return s
-	return s[:100] + "..."
+	return s[:100] + "\x1b[0m..."
 
 ###############
 ### Runtime ###
@@ -209,7 +223,7 @@ class EspError(RuntimeError):
 		fn = []
 		for name, origin, scope in zip(names, origins, scopes):
 			if origin:
-				ln, co = origin
+				ln = origin
 				origin = f"line {ln}"
 			else:
 				origin = "?"
@@ -503,14 +517,11 @@ class VM:
 					with Context(self.origins, [op[0], line]):
 						result = self.rval(op)
 				
-				case ['var', vars]:
+				case ['var', *vars]:
 					for name, value in vars:
 						match name:
-							case ['id', name]:
-								if value is None:
-									result = None
-								else:
-									result = self.rval(value)
+							case ['line', _, ['id', name]]|['id', name]:
+								result = value and self.rval(value)
 								self.stack[-1].scope[-1][name] = result
 							
 							case _:
@@ -526,9 +537,7 @@ class VM:
 				case ['return', value]:
 					raise ReturnSignal(self.rval(value))
 				
-				case ['prog', body]: result = self.rval(body)
-				
-				case ['block', body]:
+				case ['block'|'progn', *body]:
 					with self.scope():
 						for stmt in body:
 							tmp = self.rval(stmt)
@@ -610,7 +619,7 @@ class VM:
 						fn = this[fn]
 					result = self.call(fn, this, list(map(self.rval, args)))
 				
-				case ['call', fn, args]:
+				case ['call', fn, *args]:
 					fn = self.rval(fn)
 					result = self.call(fn, None, list(map(self.rval, args)))
 				
@@ -629,10 +638,10 @@ class VM:
 					result = self.rval(lhs)
 					self.rval(rhs)
 				
-				case [op, [value]]: result = self.unary(op, value)
-				case [op, [lhs, rhs]]: result = self.binary(op, lhs, rhs)
+				case [op, value]: result = self.unary(op, value)
+				case [op, lhs, rhs]: result = self.binary(op, lhs, rhs)
 				
-				case _: raise NotImplementedError(summary(ast))
+				case _: raise NotImplementedError(ast)
 			
 			return result
 		except Exception:
@@ -668,12 +677,13 @@ def main():
 	ap = argparse.ArgumentParser("espresso")
 	ap.add_argument("-f", "--file", nargs=2, metavar=('src', 'ast'))
 	ap.add_argument("-c", "--cmd", nargs=1, metavar='cmd')
-	ap.add_argument("-s", "--sexp", action="store_true")
+	ap.add_argument("-s", "--sexp", nargs=1, metavar="file")
 	argv = ap.parse_args()
 	
 	if argv.sexp:
-		print(sexp(json.loads(sys.argv[2])))
-		return
+		with open(argv.sexp[0], 'rt') as f:
+			print(sexp(json.load(f)))
+			return
 	
 	if argv.cmd:
 		ast = crema.Parser(argv.cmd[0]).parse()

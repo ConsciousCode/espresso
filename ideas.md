@@ -195,7 +195,7 @@ super keyword is necessary because it's not semantically equivalent to this.prot
 
 Very important to record this lest I forget - the virtual behavior of objects with a static type should be determined by that type, not by the data pretending to be the type. That is to say, if I have a type annotation T, all getattr, method lookup, and general behavior should be routed through T first. That way, the overloadable behavior you get with classical type systems can still be implemented by the type opting to introspect on the data to check if it has an overload. The sticking point that is keeping me up right now is how to define a type's interface without interfering with its own methods and operator overloads. In a sense, types fulfill yet another Rustian role which we have to figure out what shape it is. Also, this needs to be opt-in such that it doesn't interfere with the predicates which enable C++-like concepts, which generally won't be able to implement any specific... implementation for the native manifestation, since they're basically just assertions/contracts.
 
-It needs to be able to:
+It needs to be able to: 
 * Convert objects to a manifest native type known to the compiler (i32, struct, enum, etc)
   - .native() ?
 * Implement all valid operations on behalf of the object via its manifest (at minimum getattr, which can bootstrap all other operations)
@@ -464,7 +464,7 @@ and/or doesn't really make sense for patterns because they explicitly delineate 
 Traits are a kind of extensible method. In Rust it's interesting because the vast majority of traits only implement a single method and are used primarily for implementing polymorphism in generic functions. Take the Copy trait for instance - all it does is say anything which implements it is copyable, and converting an object to a copyable can effectively be considered the equivalent of C++ template specializations for strategies.
 
 `trait Copy: Clone {}` // Rust uses Copy as a marker trait rather than letting users overload copy behavior. All copying is bitwise. Conversely, overloadable copy behavior must be done explicitly using Clone
-```
+```rust
 pub trait Clone {
 	fn clone(&self) -> Self;
 
@@ -832,6 +832,7 @@ There is an ambiguity here, the difference between specialization and prototypin
 proto trait Clone {}
 
 proto Clone[string] {} # Want this to be a specialization for the trait for string - this behavior requires special care by the trait implementation, returning a proxy which when "prototyped" actually fills itself with the prototyped data. However, the alternative is we dedicate special syntax to this which we don't generally want to do.
+
 proto Clone[string] StringClone {} # Want this to be a prototype of Clone[string] called StringClone
 ```
 There's something worse for specialization and traits, which is that it necessarily introduces mutability into our metaobject model.
@@ -911,7 +912,7 @@ type
 
 One big issue with our current system is that the single `is` operator gives no way to distinguish types and values. Ordinarily we've been considering this a good thing, as it allows arbitrary flexibility and metaprogrammability with our type system, but when annotating higher order function signatures that take and return types there's no clear way to distinguish that what is being passed to the function is a type and not an instance of that type. This is sort of an inverse of the problem we determined earlier that a function annotated with a type should technically accept that type object and its subtypes even though none of the operations on them would make sense. I think this was handwaved because the `as` operator which is called on all parameters by the caller would panic, eg `Dog as Animal` doesn't make sense since `as` can only really operate on instances.
 
-The way Python handles this in the typing module is by having a `Type` type which escapes the instance semantics. We could easily do this as `type[T]`. However, Python does not have our inverse problem because it uses the isinsance as the primary function for type checking, whereas our `is` encompasses the functionality of both `isinstance` and `issubclass`. We could possibly rectify this with a similar solution, an `instance` type template which forces `isinstance` semantics added implicitly for argument type checking, with the following semantics: = true
+The way Python handles this in the typing module is by having a `Type` type which escapes the instance semantics. We could easily do this as `type[T]`. However, Python does not have our inverse problem because it uses the isinsance as the primary function for type checking, whereas our `is` encompasses the functionality of both `isinstance` and `issubclass`. We could possibly rectify this with a similar solution, an `instance` type template which forces `isinstance` semantics added implicitly for argument type checking, with the following semantics:
 
 `T is instance[type[U]] = type[T] is type[U]` - I briefly considered `instance[type[T]] = T`, and thus `T is instance[type[U]] = T is U`, but the problem here is that if `T` is an instance this could pass. What about the inverse, `type[instance[T]]`? Well, `T is type[instance[U]] = T is U` or `instance[T] is instance[U]`? Let's use a concrete type, `false is type[instance[bool]] = false is bool` or `instance[false] is instance[bool]`? Or conversely, `bool is type[instance[bool]] = bool is bool` or `instance[bool] is instance[bool]`?
 
@@ -938,6 +939,29 @@ let T = typeof lhs
 let type[union[...U]] = typeof rhs
 
 lhs is rhs = is(lhs, rhs) = is[typeof lhs, typeof rhs](lhs, rhs)
+
+---
+
+It might help to consider `typeof` and `instanceof` as operators to be used in conjunction with the `is` operator to narrow its semantics.
+`typeof false is bool` or `bool is typeof false`
+`false is instanceof bool`
+* is `instanceof bool is false`?
+* First has the clear semantics of "false is one of the instances of bool", but the second intuitively implies false is the only instance in the set of instances of bool
+* However, it's almost never going to be useful to define such semantics, and it's unclear what kind of type you would compare to `instanceof` so it's probably better to consider `is` as commutive, with some usages just reading strangely
+
+`typeof` takes a type and returns some object with `is` overloaded to ensure it only supports subtype relations.
+`instanceof` takes an object and returns some object with `is` overloaded to ensure it only supports instance relations.
+
+When defining function type signatures, these allow us to ensure that, for instance, with `let f(x: bool)` `f(bool)` is not a valid invocation, even though `bool is bool` is otherwise true. Type checks can be defined as either `x is instanceof bool` or `typeof x is bool`
+
+`is` is somewhat overloaded, so let's see what it does:
+* `x is x` - identity relation
+  - Languages don't typically need this, Python uses it for sentinels and checking (incorrectly) types like `type(x) is str` but you may as well use `===` which is defined as the identity relation and can't be overloaded.
+* `x is typeof x` - type relation
+* `proto x {} is x` - subtype relation
+
+Part of the problem is the operation is determined by the runtime types of the operands. `instance is type` vs `type is type`, but with function signatures that allows you to pas either an instance or a type while satisfying the singular `is` predicate.
+
 ```
 Query-based compilation?
 * "What is the compiled module object for this file?"
@@ -952,7 +976,7 @@ Espresso -> partial AST -> hybrid stack bytecode -> { register bytecode -> machi
 During the bootstrapping process we can observe and interpret the stage furthest down the line, which is fine, but I've frequently found that I want access to earlier stages for debug purposes. For instance, getting both the full AST and stack bytecode. Also, note the phrase "partial AST". The stack bytecode is sufficiently high-level that it can be emitted very early, long before the full AST is realized. We effectively only need to construct the AST for incomplete expressions to check for pattern-matching. Once a pattern is ruled out or fully specified, the bytecode can be emitted. I should also note that the bytecode forms here probably shouldn't be physically realized, but instead some kind of SSA graph on which all optimizations are done before emitting the final machine code. SSA is high level enough that whether the target is stack or register doesn't really matter.
 
 What I really want is some kind of pattern comparable to generators which can operate on recursive structures. That... might actually be a use-case for stackful coroutines. As soon as the partial AST is closed, I could say `this.downstream.yield(ast)`. What would an AST producer look like, then?
-
+1`11
 How could we support private member fields? Our current system has an approximation, non-enumerability. This can technically result in hard data privacy through the use of scope-local symbols, but our syntax as-is doesn't readily support that (the symbols have to be created out of scope and the syntax for access is special). One thing we could try is in the class creation code, annotating `this` of all the methods with a type which gives access via strings while the actual fields are backed by symbols. That's a pretty hefty rewrite though, and it doesn't compose well with eg traits.
 
 Private members can be done using static type assertions and well-designed delegates. For instance,
@@ -996,14 +1020,14 @@ General pattern matching:
   - Empty items are skipped, `...` corresponds to any number of items, and `...x` binds those arbitrary items
 * `{...}` mapping match, attempt to iterate over the value expecting `(key, value)` pairs and match against the equivalent key
   - `E: x` matches the corresponding pair, but typically `x` is used to bind `value` to a name
-  - Just `x` is equivalent to `"x": x`
-  - `...x` binds all other `key: value` pairs not matched to `x`
+  - Just `x` is equivalent to `[x as string]: x`
+  - `...x` binds all unmatched `key: value` pairs to `x`
 * `Name(...)` typed iterable match, iterates over the value and queries `Name` for each sequential match
   - `Name` can also be an ordinary function, in which case it acts as a predicate (this is actually a library detail, not a special case. Functions implement `case = call`)
 * `Name{...}` typed mapping match, iterates expecting `(key, value)` and queries `Name` for each potential key
   - `...x` binds all other `key: value` pairs not matched to `x`
 * `Name(...){...}` typed combined iterable and mapping match, used for combined Pythonic positional and keyword arguments to a typed match query
-* `x is [not] E` type query, match fails if `x is not E`
+* `x is [not] E` type query
 * `x as E` type coercion, attempts `x as E` and the match fails if it returns `none`
 * `x [not] in E` contains query, fails if `x not in E`
 * `x has [not] E` possession query, fails if `x has not E`
@@ -1045,7 +1069,28 @@ For unparameterized object prototyping, we can use an edge case of object syntax
 
 The reason we don't want to use any kind of name or symbol here is because object prototyping is a language primitive. Getting an object's prototype necessarily requires a method other than getattr, even if utility methods are provided
 
-## Bikeshedding for prototype syntax:
+## Metatypes
+Bikeshedding for metatype syntax
+
+Metatypes: class, struct, union, enum, trait
+
+class/struct have the same structural requirements, they only differ in semantics and implementation
+* Typed fields `name: type = default`
+* Methods
+* Public/private/static
+
+union
+* Typed fields with no defaults
+* Methods abstracting over the fields
+
+enum
+* List of variants
+* Each variant can have fields and/or a value
+  - Rust: `Field(x, y, z)` / `Field{x: i32, y: i32, z: i32}`
+* Methods
+
+
+## Bikeshedding for prototype syntax
 
 ### Pythonic
 ```
@@ -1137,3 +1182,9 @@ proto struct block_with_data {
 Wonder if it would be a good idea to silently promote immutable objects to a mutable prototype of the original immutable object. At the very least it would be nice to have some kind of syntax for this kind of behavior.
 
 Hyrum's law: With a sufficient number of users of an API, it does not matter what you promise in the contract: all observable behaviors of your system will be depended on by somebody
+
+proto[T] class[T] name(params) { ... }
+
+Parsing could be simplified by disallowing arbitrary expressions in the type, with support for parentheses
+
+"proto" [ "[" typelist "]" ] ( lvalue | "(" expr ")" ) [ name ] [ "(" paramlist ")" ] "{" body "}"

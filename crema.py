@@ -17,7 +17,8 @@ KW = [
 	"if", "then", "else", "loop", "while", "for",
 	"switch", "case", "return", "fail", "break", "continue"
 ]
-KWOP = ['and', 'or', 'not', 'in', 'is']
+KWBOP = ['and', 'or', 'in', 'is']
+KWUOP = ['not']
 
 SC = r"(?:(?!\\\{)\\.|.+?)*?"
 # Token regex, organized to allow them to be indexed by name
@@ -120,7 +121,7 @@ PRECS = dict(build_precs([
 	# Loosest binding strength
 	[';'],
 	['='],
-	[',', ":"],
+	[','],
 	['after'],
 	["||", "or"],
 	["&&", "and"],
@@ -204,8 +205,10 @@ class Parser:
 		if m is None:
 			return None
 		
-		if m[0] in KWOP:
-			tt = "op"
+		if m[0] in KWBOP:
+			tt = "bop"
+		elif m[0] in KWUOP:
+			tt = "uop"
 		elif m[0] in KW:
 			tt = "kw"
 		else:
@@ -263,16 +266,14 @@ class Parser:
 			yield e
 
 	def yield_sep(self, subparse="expr", sep=","):
-		if subparse == "expr":
-			subparse = lambda: self.expr(PRECS[sep])
-		else:
-			subparse = self.wrap_maybe(subparse)
-		sep = self.wrap_maybe(sep)
-		while sep():
-			if e := subparse():
-				yield e
-			else:
+		entries = []
+		while value := self.expr(PRECS[','] + 1):
+			entries.append(value)
+
+			if not self.peek(","):
 				break
+
+		return entries
 	
 	###############
 	### Clauses ###
@@ -292,7 +293,7 @@ class Parser:
 		return args
 	
 	def relaxid(self):
-		if tok := self.maybe(type={"id", "kw", "op", "assign"}):
+		if tok := self.maybe(type={"id", "kw", "bop", "uop", "assign"}):
 			return tok.value
 		elif tok := self.maybe(type={"sq", "dq", "bq"}):
 			return tok.match[1]
@@ -343,6 +344,9 @@ class Parser:
 			
 			while nt := self.peek():
 				name = self.relaxid()
+				if not name:
+					break
+				
 				vn = AST("id", name).origin(nt)
 				
 				if self.peek("("):
@@ -350,14 +354,13 @@ class Parser:
 					body = self.block()
 					value = AST("fn", AST("const", name), args, body).origin(nt)
 				elif self.maybe(":"):
-					value = self.expr(PRECS[','])
+					value = self.expr(PRECS[','] + 1)
 				else:
 					value = vn
 				
 				entries.append([vn, value])
 				
-				if not self.maybe(","):
-					break
+				self.maybe(",")
 			
 			lhs = AST("object", *entries)
 		else:
@@ -386,6 +389,7 @@ class Parser:
 			if op == ";": break
 			
 			prec = PRECS[op]
+			
 			if prec < min_prec: break
 			
 			self.consume()
@@ -403,7 +407,7 @@ class Parser:
 		cond = self.condition()
 		th = self.block()
 		el = self.maybe("else") and self.block()
-		
+
 		return AST("if", cond, th, el)
 	
 	def kw_loop(self):
@@ -413,7 +417,11 @@ class Parser:
 		return AST("loop", always)
 	
 	def kw_while(self):
-		return AST("loop", None, self.condition(), self.block())
+		cond = self.condition()
+		body = self.block()
+		el = self.maybe("else") and self.block()
+
+		return AST("loop", None, cond, body, el)
 		
 	def kw_for(self):
 		self.expect("(")
@@ -441,7 +449,7 @@ class Parser:
 			vn = AST("id", name).origin(nt)
 			
 			if self.maybe("="):
-				value = self.expr()
+				value = self.expr(PRECS[','] + 1)
 			elif self.peek("("):
 				args = self.funcargs()
 				body = self.block()
@@ -453,7 +461,7 @@ class Parser:
 			
 			if not self.maybe(","): break
 		
-		return AST("vars", vars)
+		return AST("var", *vars)
 	
 	def atom(self):
 		cur = self.peek()
@@ -477,6 +485,8 @@ class Parser:
 		elif ct in {"sq", "dq"}: result = AST("const", stresc(cur.match[1]))
 		elif ct in {"bq"}: result = AST("const", cur.match[1])
 		elif ct == "id": result = AST("id", val)
+		elif ct == "uop": result = AST(val, self.expr())
+		elif ct == "op" and val == "-": result = AST(val, self.expr())
 		
 		elif ct == "kw":
 			try:
